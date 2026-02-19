@@ -34,7 +34,42 @@ class ChannelSyncService {
                         profile: magData.profile,
                         genres: magData.genres
                     };
-                    break;
+                    // ✅ FIXED FALLBACK - Remove /c from URL for Xtream
+    if (channels.length === 0) {
+        console.log('⚠️ MAG sync returned 0 channels, trying Xtream Codes as fallback...');
+        
+        // Clean the URL for Xtream - remove /c if present
+        let xtreamUrl = playlist.sourceUrl;
+        if (xtreamUrl.endsWith('/c')) {
+            xtreamUrl = xtreamUrl.slice(0, -2);
+        } else if (xtreamUrl.endsWith('/c/')) {
+            xtreamUrl = xtreamUrl.slice(0, -3);
+        }
+        
+        console.log('Using Xtream URL:', xtreamUrl);
+        
+        const xtreamService = new XtreamService(
+            xtreamUrl,
+            playlist.xtreamUsername || '0000',
+            playlist.xtreamPassword || '0000'
+        );
+        
+        try {
+            const xtreamData = await xtreamService.syncAll();
+            if (xtreamData.channels && xtreamData.channels.length > 0) {
+                channels = xtreamData.channels;
+                playlist.type = 'xtream';
+                syncResult = {
+                    serverInfo: xtreamData.serverInfo,
+                    categories: xtreamData.categories
+                };
+                console.log(`✅ Xtream Codes found ${channels.length} channels`);
+            }
+        } catch (xtreamError) {
+            console.log('Xtream Codes fallback also failed:', xtreamError.message);
+        }
+    }
+    break;
 
                 case 'xtream':
                     service = new XtreamService(
@@ -56,29 +91,53 @@ class ChannelSyncService {
                     break;
 
                 default:
-                    // Try to detect type from URL
-                    if (playlist.sourceUrl.includes('get.php') || 
-                        playlist.sourceUrl.includes('player_api.php')) {
-                        // Likely Xtream Codes
-                        console.log('Detected Xtream Codes playlist');
-                        const xtreamService = new XtreamService(
-                            playlist.sourceUrl,
-                            playlist.xtreamUsername,
-                            playlist.xtreamPassword
-                        );
-                        const xtreamData = await xtreamService.syncAll();
-                        channels = xtreamData.channels || [];
-                        playlist.type = 'xtream';
-                    } else if (playlist.macAddress) {
-                        // Has MAC address, likely MAG
-                        console.log('Detected MAG Stalker playlist');
-                        const magService = new MagStalkerService(playlist.sourceUrl, playlist.macAddress);
-                        const magData = await magService.syncAll();
-                        channels = magData.channels || [];
-                        playlist.type = 'mag';
-                    } else {
-                        throw new Error('Unsupported playlist type');
-                    }
+    // Try to detect type from URL
+    if (playlist.sourceUrl.includes('get.php') || 
+        playlist.sourceUrl.includes('player_api.php')) {
+        // Likely Xtream Codes
+        console.log('Detected Xtream Codes playlist');
+        const xtreamService = new XtreamService(
+            playlist.sourceUrl,
+            playlist.xtreamUsername,
+            playlist.xtreamPassword
+        );
+        const xtreamData = await xtreamService.syncAll();
+        channels = xtreamData.channels || [];
+        playlist.type = 'xtream';
+    } else if (playlist.macAddress) {
+        // Has MAC address, try MAG first, then fallback to Xtream
+        console.log('Attempting MAG Stalker sync...');
+        const magService = new MagStalkerService(playlist.sourceUrl, playlist.macAddress);
+        const magData = await magService.syncAll();
+        channels = magData.channels || [];
+        
+        // If MAG returns 0 channels, try Xtream as fallback
+        if (channels.length === 0) {
+            console.log('⚠️ MAG sync returned 0 channels, trying Xtream Codes...');
+            
+            // Try to extract username/password from URL or use defaults
+            const xtreamService = new XtreamService(
+                playlist.sourceUrl,
+                playlist.xtreamUsername || '0000',
+                playlist.xtreamPassword || '0000'
+            );
+            
+            try {
+                const xtreamData = await xtreamService.syncAll();
+                if (xtreamData.channels && xtreamData.channels.length > 0) {
+                    channels = xtreamData.channels;
+                    playlist.type = 'xtream';
+                    console.log(`✅ Xtream Codes found ${channels.length} channels`);
+                }
+            } catch (xtreamError) {
+                console.log('Xtream Codes also failed:', xtreamError.message);
+            }
+        } else {
+            playlist.type = 'mag';
+        }
+    } else {
+        throw new Error('Unsupported playlist type');
+    }
             }
 
             // Update channels in database
@@ -110,22 +169,7 @@ class ChannelSyncService {
         }
     }
 
-    // Add this as a new strategy
-async getStreamWithExactVLCHeaders(channel) {
-    const url = await this.getChannelStream(channel);
-    const cleanUrl = this.extractUrlFromCmd(url) || url;
     
-    return {
-        uri: cleanUrl,
-        headers: {
-            'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18',
-            'Accept': 'video/mp2t, video/quicktime, video/*, */*',
-            'Accept-Language': 'en_US',
-            'Connection': 'keep-alive',
-            'Range': 'bytes=0-',  // VLC sends this
-        }
-    };
-}
 
     async updateChannels(channels, playlist) {
         try {
