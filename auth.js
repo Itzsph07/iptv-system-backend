@@ -1,11 +1,28 @@
-const express = require('express');
-const router = express.Router();
-const authController = require('../controllers/authController');
-const auth = require('../middleware/auth');
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
 
-router.post('/register', authController.register);
-router.post('/login', authController.login);
-router.get('/verify', auth, authController.verifyToken);
-router.post('/change-password', auth, authController.changePassword);
+module.exports = async (req, res, next) => {
+  try {
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    
+    if (!token) {
+      throw new Error();
+    }
 
-module.exports = router;
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).select('-password');
+
+    if (!user || !user.isActive) {
+      throw new Error();
+    }
+
+    req.user = user;
+    req.token = token;
+    next();
+  } catch (error) {
+    res.status(401).json({
+      success: false,
+      message: 'Please authenticate'
+    });
+  }
+};
