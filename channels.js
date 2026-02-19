@@ -1,46 +1,150 @@
-// backend/routes/channels.js
-// FIXED: Generates a FRESH play_token every time by calling create_link on the MAG server
+// backend/routes/channels.js  –  FIXED v7
+// Fixes:
+//  1. Xtream URLs: use playlist credentials first (fresh URL)
+//  2. Preserves port :80 and :8080
+//  3. MAG create_link with fresh tokens
+//  4. Handles mixed playlists (MAG + external Xtream URLs)
 
-const express = require('express');
-const router = express.Router();
-const auth = require('../middleware/auth');
-const axios = require('axios');
+const express  = require('express');
+const router   = express.Router();
+const auth     = require('../middleware/auth');
+const axios    = require('axios');
 const Playlist = require('../models/Playlist');
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-const MAG_USER_AGENT =
-  'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
+const MAG_UA =
+  'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 ' +
+  '(KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3';
 
-function magHeaders(macAddress, token, baseUrl) {
-  const headers = {
-    'User-Agent': MAG_USER_AGENT,
-    'X-User-Agent': 'Model: MAG250; Link: WiFi',
-    Accept: '*/*',
+function makeMagHeaders(mac, token, baseUrl) {
+  const h = {
+    'User-Agent':      MAG_UA,
+    'X-User-Agent':    'Model: MAG250; Link: WiFi',
+    'Accept':          '*/*',
     'Accept-Language': 'en-US,en;q=0.9',
     'Accept-Encoding': 'identity',
-    Connection: 'keep-alive',
-    Cookie: `mac=${macAddress}; stb_lang=en; timezone=GMT`,
+    'Connection':      'keep-alive',
+    'Cookie':          `mac=${mac}; stb_lang=en; timezone=GMT`,
   };
-  if (token && token !== 'no_token_required') {
-    headers.Authorization = `Bearer ${token}`;
-    headers.Cookie += `; token=${token}`;
+  if (token) {
+    h['Authorization'] = `Bearer ${token}`;
+    h['Cookie']       += `; token=${token}`;
   }
   try {
     const u = new URL(baseUrl);
-    headers.Referer = `${u.protocol}//${u.host}/c/`;
+    h['Referer'] = `${u.protocol}//${u.host}/c/`;
   } catch (_) {}
-  return headers;
+  return h;
 }
 
-function parseMAGResponse(data) {
+function parseMAG(data) {
   if (typeof data !== 'string') return data;
-  const m = data.match(/^\w+\(({.*})\);?$/s) || data.match(/({.*})/s);
-  if (m) {
-    try { return JSON.parse(m[1]); } catch (_) {}
+  for (const rx of [/^\w+\(({.*})\);?$/s, /({.*})/s]) {
+    const m = data.match(rx);
+    if (m) try { return JSON.parse(m[1]); } catch (_) {}
   }
   try { return JSON.parse(data); } catch (_) {}
   return { js: data };
+}
+
+function getStreamId(text) {
+  const m = String(text || '').match(/[?&]stream=(\d+)/);
+  return m ? m[1] : null;
+}
+
+function extractUrl(raw) {
+  if (!raw) return null;
+  const s = String(raw)
+    .replace(/^ff(mpeg|rt)\s+/i, '')
+    .replace(/[\t\n\r]/g, '')
+    .trim();
+  const m = s.match(/https?:\/\/[^\s"']+/);
+  return m ? m[0] : null;
+}
+
+function ensureStreamId(url, streamId) {
+  if (!url || !streamId) return url;
+  try {
+    const u = new URL(url);
+    const cur = u.searchParams.get('stream');
+    if (!cur || cur.trim() === '') {
+      u.searchParams.set('stream', streamId);
+      console.log(`🔧 Injected stream=${streamId}`);
+      return u.toString();
+    }
+    return url;
+  } catch (_) {
+    return url.replace(/([?&]stream=)([^&]*)/, `$1${streamId}`);
+  }
+}
+
+/**
+ * Detect if URL is Xtream Codes format:
+ *   http://host:port/user/pass/streamId[.ts]
+ *   OR
+ *   http://host:port/live/user/pass/streamId[.ts]
+ */
+function isXtreamUrl(url) {
+  if (!url) return false;
+  const base  = url.split('?')[0].split('#')[0];
+  const m     = base.match(/^https?:\/\/[^/]+(\/.*)?$/);
+  if (!m) return false;
+  const parts = (m[1] || '').split('/').filter(Boolean);
+  const last  = parts[parts.length - 1] || '';
+  
+  // Format 1: /live/user/pass/streamId[.ts]  (4 parts)
+  if (parts.length === 4 && parts[0] === 'live') {
+    return /^\d+(\.(ts|m3u8|mp4))?$/i.test(last);
+  }
+  
+  // Format 2: /user/pass/streamId[.ts]  (3 parts, missing /live/)
+  if (parts.length === 3) {
+    return /^\d+(\.(ts|m3u8|mp4))?$/i.test(last);
+  }
+  
+  return false;
+}
+
+/**
+ * Clean Xtream URL:
+ *  - Strip query params / fragments
+ *  - Ensure .ts extension
+ *  - Inject /live/ if missing
+ *  - Preserve port :80 / :8080
+ */
+function cleanXtreamUrl(url) {
+  // 1. Strip query & fragment
+  let clean = url.split('?')[0].split('#')[0].trim().replace(/\/$/, '');
+
+  // 2. Parse path to inject /live/ if needed
+  const m = clean.match(/^(https?:\/\/[^/]+)(\/.*)?$/);
+  if (m) {
+    const base = m[1];
+    const path = m[2] || '';
+    const parts = path.split('/').filter(Boolean);
+    
+    // Check if /live/ is missing
+    if (parts.length === 3 && parts[0] !== 'live') {
+      // Format: /user/pass/streamId  →  /live/user/pass/streamId
+      const [user, pass, streamId] = parts;
+      clean = `${base}/live/${user}/${pass}/${streamId}`;
+      console.log(`🔧 Injected /live/ into Xtream URL`);
+    } else if (parts.length === 4 && parts[0] === 'live') {
+      // Already has /live/, keep as-is
+      clean = `${base}/${parts.join('/')}`;
+    } else {
+      // Unexpected format, return as-is
+      clean = base + path;
+    }
+  }
+
+  // 3. Ensure .ts extension
+  if (!/\.(ts|m3u8|mp4)$/i.test(clean)) {
+    clean += '.ts';
+  }
+
+  return clean;
 }
 
 const API_PATHS = [
@@ -50,133 +154,204 @@ const API_PATHS = [
   '/portal/server/load.php',
 ];
 
-async function magHandshake(baseUrl, macAddress) {
+async function doHandshake(baseUrl, mac) {
   for (const path of API_PATHS) {
     try {
-      const res = await axios.get(`${baseUrl}${path}`, {
-        params: { type: 'stb', action: 'handshake', token: '', JsHttpRequest: '1-xml' },
-        headers: magHeaders(macAddress, null, baseUrl),
+      const r = await axios.get(`${baseUrl}${path}`, {
+        params:  { type: 'stb', action: 'handshake', token: '', JsHttpRequest: '1-xml' },
+        headers: makeMagHeaders(mac, null, baseUrl),
         timeout: 8000,
       });
-      const d = parseMAGResponse(res.data);
-      const token = d?.js?.token || d?.token;
+      const d     = parseMAG(r.data);
+      const token = d?.js?.token ?? d?.token;
       if (token) {
-        console.log(`✅ MAG handshake OK on ${path}, token: ${token}`);
+        console.log(`✅ Handshake OK  path=${path}  token=${token}`);
         return { token, apiPath: path };
       }
-    } catch (_) {}
+    } catch (e) {
+      console.log(`   Handshake ${path} → ${e.message}`);
+    }
   }
-  console.log('⚠️  MAG handshake failed – continuing without token');
-  return { token: null, apiPath: '/server/load.php' };
+  console.warn('⚠️  All handshake paths failed');
+  return { token: null, apiPath: API_PATHS[0] };
 }
 
-async function magCreateLink(baseUrl, apiPath, macAddress, token, cmd) {
+async function doCreateLink(baseUrl, apiPath, mac, token, cmdArg) {
   try {
-    const res = await axios.get(`${baseUrl}${apiPath}`, {
+    console.log(`🔗 create_link  cmd="${String(cmdArg).slice(0, 120)}"`);
+    const r = await axios.get(`${baseUrl}${apiPath}`, {
       params: {
-        type: 'itv',
-        action: 'create_link',
-        cmd,
-        series: 0,
+        type:           'itv',
+        action:         'create_link',
+        cmd:            cmdArg,
+        series:         0,
         forced_storage: 0,
-        disable_ad: 0,
-        JsHttpRequest: '1-xml',
-        ...(token && { token }),
+        disable_ad:     0,
+        JsHttpRequest:  '1-xml',
+        ...(token ? { token } : {}),
       },
-      headers: magHeaders(macAddress, token, baseUrl),
+      headers: makeMagHeaders(mac, token, baseUrl),
       timeout: 10000,
     });
-    const d = parseMAGResponse(res.data);
-    const freshCmd = d?.js?.cmd || d?.js?.url;
-    console.log('🔗 create_link response cmd:', freshCmd);
-    return freshCmd || null;
-  } catch (err) {
-    console.error('create_link error:', err.message);
+    const d   = parseMAG(r.data);
+    const out = d?.js?.cmd ?? d?.js?.url ?? null;
+    console.log(`   → "${String(out).slice(0, 120)}"`);
+    return out;
+  } catch (e) {
+    console.error('   create_link error:', e.message);
     return null;
   }
 }
 
-function extractUrl(raw) {
-  if (!raw) return null;
-  // Strip ffmpeg / ffrt prefix
-  const cleaned = raw.replace(/^ff(mpeg|rt)\s+/i, '').replace(/[\t\n\r]/g, '').trim();
-  const m = cleaned.match(/https?:\/\/\S+/);
-  return m ? m[0] : null;
-}
-
-// ─── route ───────────────────────────────────────────────────────────────────
+// ─── route ────────────────────────────────────────────────────────────────────
 
 router.post('/get-stream', auth, async (req, res) => {
   try {
     const { playlistId, channelId, cmd } = req.body;
 
-    console.log('🎬 get-stream called for channelId:', channelId);
-    console.log('   cmd:', cmd);
+    console.log('\n══════════ get-stream ══════════');
+    console.log('channelId :', channelId);
+    console.log('cmd       :', cmd);
 
-    // ── 1. Look up the playlist to get type + MAG credentials ──────────────
+    const rawUrl   = extractUrl(cmd);
+    const streamId = getStreamId(cmd) || channelId;
+
+    console.log('rawUrl    :', rawUrl);
+    console.log('streamId  :', streamId);
+
+    // ── Get playlist ──────────────────────────────────────────────────────
     const playlist = await Playlist.findById(playlistId).lean();
-
     if (!playlist) {
-      console.warn('⚠️  Playlist not found:', playlistId);
+      return res.status(404).json({ success: false, message: 'Playlist not found' });
     }
 
-    const isMag =
-      playlist && (playlist.type === 'mag' || playlist.type === 'stalker');
+    // Log playlist details
+    console.log('Playlist type:', playlist.type);
+    console.log('xtreamUsername:', playlist.xtreamUsername);
+    console.log('username:', playlist.username);
+    console.log('xtreamPassword:', playlist.xtreamPassword ? '[HIDDEN]' : 'undefined');
+    console.log('password:', playlist.password ? '[HIDDEN]' : 'undefined');
+    console.log('sourceUrl:', playlist.sourceUrl);
+    console.log('macAddress:', playlist.macAddress);
 
-    // ── 2. For MAG/Stalker: get a FRESH token via create_link ───────────────
-    if (isMag && playlist.sourceUrl && playlist.macAddress) {
-      console.log('📡 MAG playlist detected – generating fresh stream link...');
+    // Extract hosts for comparison
+    let rawHost = null;
+    let playlistHost = null;
+    
+    try {
+      if (rawUrl) rawHost = new URL(rawUrl).host;
+      if (playlist.sourceUrl) playlistHost = new URL(playlist.sourceUrl).host;
+    } catch (_) {}
 
-      const baseUrl = playlist.sourceUrl.replace(/\/+$/, '');
-      const macAddress = playlist.macAddress;
+    console.log('rawHost:', rawHost);
+    console.log('playlistHost:', playlistHost);
 
-      // Handshake → fresh auth token
-      const { token, apiPath } = await magHandshake(baseUrl, macAddress);
+  // ── CASE 1: External Xtream URL (different host) ──────────────────────
+if (rawUrl && rawHost && playlistHost && rawHost !== playlistHost) {
+  // Add .ts extension if missing (Xtream servers often need it)
+  let finalUrl = rawUrl;
+  if (isXtreamUrl(rawUrl) && !rawUrl.includes('.ts') && !rawUrl.includes('.m3u8') && !rawUrl.includes('.mp4')) {
+    const lastSegment = rawUrl.split('/').pop() || '';
+    if (/^\d+$/.test(lastSegment)) {
+      finalUrl = rawUrl + '.ts';
+      console.log('🔧 Added .ts extension to external Xtream URL');
+    }
+  }
+  console.log('✅ External Xtream URL detected → using:', finalUrl);
+  return res.json({ success: true, url: finalUrl, type: 'xtream' });
+}
 
-      // The cmd stored in the Channel document (e.g. "ffmpeg http://…/play/live.php?…&stream=1134458")
-      // We only need the raw cmd value (not the full URL) for create_link
-      // MAG create_link expects the cmd exactly as stored in the channel list
-      const rawCmd = cmd; // e.g. "ffmpeg http://host/play/live.php?mac=…&stream=ID&extension=ts"
-
-      // Try create_link with the full cmd first
-      let freshCmd = await magCreateLink(baseUrl, apiPath, macAddress, token, rawCmd);
-
-      // If that didn't work, try with just the stream path
-      if (!freshCmd) {
-        const streamIdMatch = rawCmd.match(/stream=(\d+)/);
-        if (streamIdMatch) {
-          const altCmd = `ffmpeg http://${new URL(extractUrl(rawCmd) || baseUrl).host}/play/live.php?mac=${macAddress}&stream=${streamIdMatch[1]}&extension=ts`;
-          freshCmd = await magCreateLink(baseUrl, apiPath, macAddress, token, altCmd);
+    // ── CASE 2: Same-host Xtream URL ──────────────────────────────────────
+    if (rawUrl && isXtreamUrl(rawUrl)) {
+      // Try playlist credentials first
+      if (playlist.sourceUrl) {
+        const baseUrl = playlist.sourceUrl.replace(/\/+$/, '');
+        const username = playlist.xtreamUsername || playlist.username;
+        const password = playlist.xtreamPassword || playlist.password;
+        
+        if (username && password) {
+          const xtreamUrl = `${baseUrl}/live/${username}/${password}/${streamId}.ts`;
+          console.log('✅ Xtream URL (from playlist credentials):', xtreamUrl);
+          return res.json({ success: true, url: xtreamUrl, type: 'xtream' });
         }
+      }
+
+      // Fallback to cleaned raw URL
+      const xtreamUrl = cleanXtreamUrl(rawUrl);
+      console.log('✅ Xtream URL (fallback from raw):', xtreamUrl);
+      return res.json({ success: true, url: xtreamUrl, type: 'xtream' });
+    }
+
+    // ── CASE 3: Xtream playlist type (legacy check) ───────────────────────
+    const isXtreamPlaylist = playlist?.type === 'xtream';
+
+    if (isXtreamPlaylist) {
+      const baseUrl  = playlist.sourceUrl?.replace(/\/+$/, '');
+      const username = playlist.xtreamUsername || playlist.username;
+      const password = playlist.xtreamPassword || playlist.password;
+
+      if (baseUrl && username && password) {
+        const xtreamUrl = `${baseUrl}/live/${username}/${password}/${channelId}.ts`;
+        console.log('✅ Xtream playlist → returning:', xtreamUrl);
+        return res.json({ success: true, url: xtreamUrl, type: 'xtream' });
+      }
+
+      if (rawUrl) {
+        const cleaned = cleanXtreamUrl(rawUrl);
+        console.log('✅ Xtream fallback URL:', cleaned);
+        return res.json({ success: true, url: cleaned, type: 'xtream' });
+      }
+    }
+
+    // ── CASE 4: MAG/Stalker: handshake + create_link ──────────────────────
+    const isMag = playlist?.type === 'mag' || playlist?.type === 'stalker';
+
+    if (isMag && playlist?.sourceUrl && playlist?.macAddress) {
+      const baseUrl = playlist.sourceUrl.replace(/\/+$/, '');
+      const mac     = playlist.macAddress;
+
+      console.log('📡 MAG  baseUrl=', baseUrl, ' mac=', mac);
+
+      const { token, apiPath } = await doHandshake(baseUrl, mac);
+
+      let freshCmd = await doCreateLink(baseUrl, apiPath, mac, token, cmd);
+
+      if (!freshCmd && rawUrl) {
+        freshCmd = await doCreateLink(baseUrl, apiPath, mac, token, rawUrl);
+      }
+
+      if (!freshCmd && streamId) {
+        try {
+          const host  = new URL(rawUrl || baseUrl).host;
+          const short = `ffmpeg http://${host}/play/live.php?mac=${mac}&stream=${streamId}&extension=ts`;
+          freshCmd = await doCreateLink(baseUrl, apiPath, mac, token, short);
+        } catch (_) {}
       }
 
       if (freshCmd) {
-        const freshUrl = extractUrl(freshCmd);
+        let freshUrl = extractUrl(freshCmd);
         if (freshUrl) {
+          freshUrl = ensureStreamId(freshUrl, streamId);
           console.log('✅ Fresh MAG URL:', freshUrl);
-          return res.json({ success: true, url: freshUrl });
+          return res.json({ success: true, url: freshUrl, type: 'mag' });
         }
       }
 
-      console.warn('⚠️  create_link failed – falling back to stored cmd URL');
+      console.warn('⚠️  create_link failed – falling back');
     }
 
-    // ── 3. Fallback: extract URL straight from the stored cmd ───────────────
-    const fallbackUrl = extractUrl(cmd);
-
-    if (!fallbackUrl) {
-      return res.status(400).json({
-        success: false,
-        message: 'No valid URL found in cmd',
-      });
+    // ── CASE 5: Final fallback ────────────────────────────────────────────
+    if (!rawUrl) {
+      return res.status(400).json({ success: false, message: 'No valid URL in cmd' });
     }
 
-    console.log('ℹ️  Returning stored URL (may have stale token):', fallbackUrl);
-    return res.json({ success: true, url: fallbackUrl });
+    const safeUrl = ensureStreamId(rawUrl, streamId);
+    console.log('ℹ️  Fallback URL:', safeUrl);
+    return res.json({ success: true, url: safeUrl });
 
-  } catch (error) {
-    console.error('Error in get-stream:', error);
-    res.status(500).json({ success: false, message: error.message });
+  } catch (err) {
+    console.error('get-stream error:', err);
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 

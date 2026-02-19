@@ -28,50 +28,26 @@ router.get('/dashboard', [auth, admin], async (req, res) => {
 });
 
 // ========== PLAYLIST ROUTES ==========
-// Get all playlists
 router.get('/playlists', [auth, admin], playlistController.getPlaylists);
-
-// Create playlist
 router.post('/playlists', [auth, admin], playlistController.createPlaylist);
-
-// Update playlist
 router.put('/playlists/:id', [auth, admin], playlistController.updatePlaylist);
-
-// DELETE playlist - THIS WAS MISSING
 router.delete('/playlists/:id', [auth, admin], playlistController.deletePlaylist);
-
-// Test connection
 router.post('/playlists/test-connection', [auth, admin], playlistController.testConnection);
-
-// Sync playlist
 router.post('/playlists/:playlistId/sync', [auth, admin], playlistController.syncPlaylist);
-
-// Get playlist channels
 router.get('/playlists/:playlistId/channels', [auth, admin], playlistController.getChannels);
-
-// Update channel visibility
 router.put('/playlists/:playlistId/channels/:channelId', [auth, admin], playlistController.updateChannelVisibility);
-
-// Bulk update channels
 router.post('/playlists/:playlistId/channels/bulk', [auth, admin], playlistController.bulkUpdateChannels);
 
 // ========== CUSTOMER ROUTES ==========
-// Get all customers
 router.get('/customers', [auth, admin], customerController.getCustomers);
-
-// Create customer
 router.post('/customers', [auth, admin], customerController.createCustomer);
-
-// Update customer
 router.put('/customers/:id', [auth, admin], customerController.updateCustomer);
-
-// DELETE customer - THIS WAS MISSING
 router.delete('/customers/:id', [auth, admin], customerController.deleteCustomer);
-
-// Assign playlist to customer
 router.post('/customers/:customerId/playlists/:playlistId', [auth, admin], customerController.assignPlaylist);
-
-// Remove playlist from customer
 router.delete('/customers/:customerId/playlists/:playlistId', [auth, admin], customerController.removePlaylist);
+
+// ========== TOKEN MANAGEMENT ROUTES ==========
+// Note: These are now in tokenRoutes.js, but we'll keep a reference here
+// The actual routes are mounted at /api/admin/token in app.js
 
 module.exports = router;

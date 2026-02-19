@@ -12,4 +12,14 @@ router.get('/:playlistId/channels', [auth, admin], playlistController.getChannel
 router.put('/:playlistId/channels/:channelId', [auth, admin], playlistController.updateChannelVisibility);
 router.post('/:playlistId/channels/bulk', [auth, admin], playlistController.bulkUpdateChannels);
 
+router.post('/:playlistId/force-sync', [auth, admin], async (req, res) => {
+    try {
+        const ChannelSyncService = require('../services/channelSyncService');
+        const syncService = new ChannelSyncService(req.params.playlistId);
+        const result = await syncService.syncPlaylist();
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 module.exports = router;
