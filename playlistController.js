@@ -204,15 +204,19 @@ exports.syncPlaylist = async (req, res) => {
 };
 
 // Get channels
+// Get channels - return ALL channels (visible and hidden) for admin editing
 exports.getChannels = async (req, res) => {
     try {
         const { playlistId } = req.params;
-        console.log('📺 Fetching channels for playlist:', playlistId);
+        console.log('📺 Fetching ALL channels for playlist:', playlistId);
 
+        // Remove the isVisible filter - get all channels
         const channels = await Channel.find({
-            playlistId,
-            isVisible: true
+            playlistId
+            // isVisible: true  ← REMOVE THIS LINE
         }).sort('customOrder');
+
+        console.log(`✅ Found ${channels.length} total channels (visible + hidden)`);
 
         res.json({
             success: true,
@@ -281,41 +285,57 @@ exports.updateChannelVisibility = async (req, res) => {
 };
 
 // Bulk update channels
+// Bulk update channels - OPTIMIZED VERSION
 exports.bulkUpdateChannels = async (req, res) => {
     try {
         const { playlistId } = req.params;
         const { updates } = req.body;
 
-        console.log('📦 Bulk updating', updates.length, 'channels');
+        console.log(`📦 Bulk updating ${updates.length} channels for playlist ${playlistId}`);
 
+        // Get all channel IDs from updates
+        const channelIds = updates.map(u => u.channelId);
+        
+        // Determine the operation (all updates should have same isVisible value)
+        const targetVisibility = updates[0]?.isVisible;
+        
+        console.log(`🎯 Target visibility: ${targetVisibility}`);
+
+        // SINGLE QUERY - Update all channels at once
+        const result = await Channel.updateMany(
+            { 
+                playlistId, 
+                channelId: { $in: channelIds } 
+            },
+            { $set: { isVisible: targetVisibility } }
+        );
+
+        console.log(`✅ Database updated: ${result.modifiedCount} channels`);
+
+        // Update playlist settings
         const playlist = await Playlist.findById(playlistId);
-
-        for (const update of updates) {
+        
+        for (const channelId of channelIds) {
             const existingSettingIndex = playlist.channelSettings.findIndex(
-                s => s.channelId === update.channelId
+                s => s.channelId === channelId
             );
 
             if (existingSettingIndex >= 0) {
-                playlist.channelSettings[existingSettingIndex] = {
-                    ...playlist.channelSettings[existingSettingIndex],
-                    ...update
-                };
+                playlist.channelSettings[existingSettingIndex].isVisible = targetVisibility;
             } else {
-                playlist.channelSettings.push(update);
+                playlist.channelSettings.push({
+                    channelId,
+                    isVisible: targetVisibility
+                });
             }
-
-            // Update channel
-            await Channel.findOneAndUpdate(
-                { playlistId, channelId: update.channelId },
-                update
-            );
         }
 
         await playlist.save();
 
         res.json({
             success: true,
-            message: `Updated ${updates.length} channels`
+            message: `Updated ${updates.length} channels`,
+            modifiedCount: result.modifiedCount
         });
     } catch (error) {
         console.error('❌ Error:', error);
